@@ -115,11 +115,28 @@ fn vllm_metal_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Block table utilities
     m.add_function(wrap_pyfunction!(block_table::compute_slot_mapping_vectorized, m)?)?;
 
-    // Metal classes (macOS only)
+    // Metal classes and functions (macOS only)
     #[cfg(target_os = "macos")]
     {
+        // Classes
         m.add_class::<metal::buffer::MetalBuffer>()?;
         m.add_class::<metal::device::PyMetalContext>()?;
+        m.add_class::<metal::tensor_bridge::TensorMetalView>()?;
+
+        // Tensor bridge functions
+        m.add_function(wrap_pyfunction!(metal::tensor_bridge::metal_buffer_from_tensor, m)?)?;
+        m.add_function(wrap_pyfunction!(metal::tensor_bridge::tensor_to_metal, m)?)?;
+        m.add_function(wrap_pyfunction!(metal::tensor_bridge::tensors_to_metal, m)?)?;
+        m.add_function(wrap_pyfunction!(metal::tensor_bridge::init_metal_runtime, m)?)?;
+        m.add_function(wrap_pyfunction!(metal::tensor_bridge::get_metal_device_info, m)?)?;
+        m.add_function(wrap_pyfunction!(metal::tensor_bridge::metal_synchronize, m)?)?;
+
+        // Attention operations
+        m.add_function(wrap_pyfunction!(metal::attention_ops::metal_sdpa, m)?)?;
+        m.add_function(wrap_pyfunction!(metal::attention_ops::metal_paged_attention, m)?)?;
+        m.add_function(wrap_pyfunction!(metal::attention_ops::load_metal_library, m)?)?;
+        m.add_function(wrap_pyfunction!(metal::attention_ops::is_metal_available, m)?)?;
+        m.add_function(wrap_pyfunction!(metal::attention_ops::metal_device_info, m)?)?;
     }
 
     Ok(())

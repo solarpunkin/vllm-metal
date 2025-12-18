@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Metal attention backend for vLLM V1 architecture."""
+"""Metal attention backend for vLLM V1 architecture.
+
+This backend uses Rust/Metal kernels via unified memory, avoiding the MPS backend.
+PyTorch tensors are kept on CPU, but the underlying memory is directly accessible
+by Metal GPU kernels on Apple Silicon's unified memory architecture.
+"""
 
 from dataclasses import dataclass
 from typing import ClassVar
@@ -21,6 +26,18 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
+
+# Try to import Rust Metal extensions
+try:
+    import vllm_metal_rust
+
+    METAL_RUST_AVAILABLE = vllm_metal_rust.is_metal_available()
+    if METAL_RUST_AVAILABLE:
+        device_name, max_threads, max_mem = vllm_metal_rust.metal_device_info()
+        logger.info(f"Metal Rust backend available: {device_name}")
+except ImportError:
+    METAL_RUST_AVAILABLE = False
+    logger.warning("Rust Metal extensions not available, using PyTorch SDPA fallback")
 
 
 @dataclass
@@ -189,21 +206,54 @@ class MetalAttentionImpl(AttentionImpl):
         """Compute attention for prefill phase.
 
         For prefill, use the incoming K, V directly with causal masking.
+        Uses Rust/Metal kernel when available, falls back to PyTorch SDPA.
         """
-        # Simple case: use SDPA with causal mask
         # Input: [num_tokens, num_heads, head_size]
-        # SDPA expects: [batch, num_heads, seq_len, head_size]
+        # Metal SDPA expects: [num_queries, num_heads, head_dim] for Q
+        #                     [num_queries, seq_len, num_kv_heads, head_dim] for K, V
 
-        # For now, treat the entire batch as one sequence
-        # TODO: Handle variable length sequences properly
+        # Expand KV for GQA if needed
+        if self.num_queries_per_kv > 1:
+            key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
+            value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
+
+        # Metal kernels support head_dim of 64, 128, 256
+        # Fall back to PyTorch SDPA for unsupported sizes
+        head_dim = query.shape[-1]
+        metal_supported_head_dims = (64, 128, 256)
+
+        if METAL_RUST_AVAILABLE and head_dim in metal_supported_head_dims:
+            # Use Rust/Metal kernel with zero-copy from CPU tensors
+            # Ensure tensors are contiguous and on CPU for unified memory access
+            q = query.contiguous()
+            k = key.contiguous()
+            v = value.contiguous()
+
+            # Ensure CPU tensors (Metal uses unified memory)
+            if q.device.type != "cpu":
+                q = q.cpu()
+                k = k.cpu()
+                v = v.cpu()
+
+            # Reshape for Metal SDPA: [num_tokens, seq_len, num_heads, head_dim]
+            num_tokens = q.shape[0]
+
+            # Reshape K, V to add seq_len dimension
+            # [num_tokens, num_heads, head_dim] -> [num_tokens, seq_len, num_heads, head_dim]
+            k_reshaped = k.unsqueeze(0).expand(num_tokens, -1, -1, -1)
+            v_reshaped = v.unsqueeze(0).expand(num_tokens, -1, -1, -1)
+
+            # Create output tensor
+            out = torch.empty_like(q)
+
+            vllm_metal_rust.metal_sdpa(q, k_reshaped, v_reshaped, out, self.scale)
+            return out
+
+        # Fallback to PyTorch SDPA
+        # SDPA expects: [batch, num_heads, seq_len, head_size]
         query = query.transpose(0, 1).unsqueeze(0)  # [1, num_heads, seq, head]
         key = key.transpose(0, 1).unsqueeze(0)
         value = value.transpose(0, 1).unsqueeze(0)
-
-        # Expand KV for GQA if needed
-        if self.num_queries_per_kv > 1 and key.shape[1] != query.shape[1]:
-            key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
-            value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
 
         out = nnf.scaled_dot_product_attention(
             query,
@@ -228,8 +278,67 @@ class MetalAttentionImpl(AttentionImpl):
         """Compute attention for decode phase.
 
         For decode, read K, V from cache using block tables.
+        Uses Rust/Metal paged attention kernel when available.
         """
         batch_size = query.shape[0]
+
+        # Metal kernels support head_dim of 64, 128, 256
+        # Fall back to PyTorch SDPA for unsupported sizes
+        head_dim = query.shape[-1]
+        metal_supported_head_dims = (64, 128, 256)
+
+        if (
+            METAL_RUST_AVAILABLE
+            and kv_cache is not None
+            and head_dim in metal_supported_head_dims
+        ):
+            # Use Rust/Metal paged attention kernel
+            # KV cache layout: [num_blocks, 2, block_size, num_kv_heads, head_size]
+            # Metal expects: [num_blocks, block_size, num_kv_heads, head_size] for K and V
+
+            # Split KV cache into separate key and value caches
+            key_cache = kv_cache[
+                :, 0, :, :, :
+            ].contiguous()  # [num_blocks, block_size, num_kv_heads, head_size]
+            value_cache = kv_cache[:, 1, :, :, :].contiguous()
+
+            # Ensure tensors are on CPU for unified memory access
+            q = query.contiguous()
+            if q.device.type != "cpu":
+                q = q.cpu()
+                key_cache = key_cache.cpu()
+                value_cache = value_cache.cpu()
+
+            block_table = attn_metadata.block_table.contiguous()
+            seq_lens = attn_metadata.seq_lens.contiguous()
+
+            if block_table.device.type != "cpu":
+                block_table = block_table.cpu()
+            if seq_lens.device.type != "cpu":
+                seq_lens = seq_lens.cpu()
+
+            # Ensure proper dtype for block table and seq lens
+            block_table = block_table.to(torch.int32)
+            seq_lens = seq_lens.to(torch.int32)
+
+            # Create output tensor
+            out = torch.empty_like(q)
+
+            block_size = kv_cache.shape[2]
+
+            vllm_metal_rust.metal_paged_attention(
+                q,
+                key_cache,
+                value_cache,
+                block_table,
+                seq_lens,
+                out,
+                self.scale,
+                block_size,
+            )
+            return out
+
+        # Fallback to PyTorch loop-based decode
         outputs = []
 
         for i in range(batch_size):

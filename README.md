@@ -33,7 +33,6 @@ scripts/ci.sh  # This will setup the dev environment
 ## Requirements
 
 - Apple Silicon Mac
-- Python 3.11 or later
 - vLLM 0.12.0 or later
 
 ## Configuration

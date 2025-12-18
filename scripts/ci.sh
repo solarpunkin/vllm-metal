@@ -11,11 +11,21 @@ main() {
 
   setup_dev_env
 
+  # Install vllm with --no-deps to avoid CUDA dependencies and install its macOS-compatible deps
+  section "Installing vllm"
+  uv pip install --upgrade --no-deps vllm
+  # Install minimal deps needed for vllm to import (for tests)
+  uv pip install pydantic cbor2 msgspec cloudpickle prometheus-client fastapi uvicorn uvloop pillow \
+    tiktoken typing_extensions filelock py-cpuinfo aiohttp openai einops importlib_metadata mistral_common \
+    pyyaml requests tqdm sentencepiece gguf blake3 pyzmq regex protobuf setuptools depyf numba \
+    tokenizers
+
   if is_apple_silicon; then
     brew install shellcheck
   fi
 
-  shellcheck -- *.sh */*.sh
+  section "Running shellcheck"
+  shellcheck -- *.sh scripts/*.sh
 
   section "Running ruff linter"
   ruff check .

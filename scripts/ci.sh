@@ -99,13 +99,13 @@ main() {
 
   linters
 
-  section "Running tests"
-  pytest tests/ -v --tb=short
-
-  section "Verifying package import"
-  python -c "import vllm_metal; print('vllm_metal imported successfully')"
-
   if [ "$(uname)" == "Darwin" ]; then
+    section "Running tests"
+    pytest tests/ -v --tb=short
+
+    section "Verifying package import"
+    python -c "import vllm_metal; print('vllm_metal imported successfully')"
+
     smoke_test
   fi
 }

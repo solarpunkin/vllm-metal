@@ -780,12 +780,18 @@ class MetalModelRunner:
 
         segments: list[str] = []
 
+        # Create sampler based on temperature (mlx_lm 0.29+ uses sampler param)
+        def sampler(logits: mx.array) -> mx.array:
+            if temperature < 1e-5:
+                return mx.argmax(logits, axis=-1)
+            return mx.random.categorical(logits / temperature)
+
         for response in stream_generate(
             self.model,
             self.tokenizer,
             prompt=prompt,
             max_tokens=max_tokens,
-            temp=temperature,
+            sampler=sampler,
         ):
             segments.append(response.text)
 

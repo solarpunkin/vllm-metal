@@ -33,22 +33,25 @@ def test_generate_accumulates_streamed_segments(monkeypatch) -> None:
     assert out == "hello world"
     assert captured["prompt"] == "p"
     assert captured["max_tokens"] == 3
-    assert captured["kwargs"].get("temp") == 0.0
+    # mlx_lm 0.29+ uses sampler parameter instead of temp
+    assert "sampler" in captured["kwargs"]
+    assert callable(captured["kwargs"]["sampler"])
 
 
-def test_generate_falls_back_to_temp_if_sampler_rejected(monkeypatch) -> None:
+def test_generate_passes_sampler_for_temperature_sampling(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     def fake_stream_generate(model, tokenizer, prompt, max_tokens=256, **kwargs):
         captured["kwargs"] = kwargs
-        assert "temp" in kwargs
+        assert "sampler" in kwargs
+        assert callable(kwargs["sampler"])
         yield SimpleNamespace(text="a")
         yield SimpleNamespace(text="b")
 
     monkeypatch.setattr(mr, "stream_generate", fake_stream_generate)
 
     runner = _make_runner(mr)
-    out = runner.generate("p", max_tokens=2, temperature=0.0)
+    out = runner.generate("p", max_tokens=2, temperature=0.5)
 
     assert out == "ab"
-    assert "temp" in captured["kwargs"]
+    assert "sampler" in captured["kwargs"]

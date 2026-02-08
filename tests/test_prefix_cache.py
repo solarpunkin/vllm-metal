@@ -9,10 +9,16 @@ import mlx.core as mx
 import vllm_metal.v1.model_runner as mr
 
 
-class StubMambaCache:
+class StubArraysCache:
+    def __init__(self):
+        self.cache = [None, None]
+
+    def __getitem__(self, idx):
+        return self.cache[idx]
+
     @property
     def state(self):
-        return []
+        return self.cache
 
 
 class TestPrefixCacheHybridGuard:
@@ -32,7 +38,7 @@ class TestPrefixCacheHybridGuard:
             kv.keys = mx.zeros((1, 8, 0, 64))
             kv.values = mx.zeros((1, 8, 0, 64))
             kv.offset = 0
-            return [kv, StubMambaCache(), kv]
+            return [kv, StubArraysCache(), kv]
 
         monkeypatch.setattr(mr, "make_prompt_cache", fake_make_prompt_cache)
 
@@ -51,6 +57,10 @@ class TestPrefixCacheHybridGuard:
             frequency_penalty=0,
             presence_penalty=0,
             repetition_penalty=1.0,
+            logprobs=None,
+            seed=None,
+            logit_bias=None,
+            logits_processors=None,
         )
 
         runner._prefill_single("req-1", token_ids, sampling_params)
@@ -84,6 +94,10 @@ class TestPrefixCacheHybridGuard:
             frequency_penalty=0,
             presence_penalty=0,
             repetition_penalty=1.0,
+            logprobs=None,
+            seed=None,
+            logit_bias=None,
+            logits_processors=None,
         )
 
         runner._prefill_single("req-1", token_ids, sampling_params)

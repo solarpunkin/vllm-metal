@@ -25,7 +25,6 @@ from mlx_lm.models.cache import (
     ArraysCache,
     BatchKVCache,
     KVCache,
-    MambaCache,
     make_prompt_cache,
 )
 
@@ -193,59 +192,12 @@ class PrefixCacheManager:
 
 
 # Type alias for any cache type supported by the model
-AnyCache: TypeAlias = KVCache | MambaCache | ArraysCache
-
-
-class BatchMambaCache:
-    """Batched cache for Mamba/SSM layers.
-
-    Wraps multiple MambaCache instances into a single batched cache
-    for efficient batched forward passes on hybrid models.
-    """
-
-    def __init__(self, caches: list[MambaCache | ArraysCache]):
-        """Create a batched Mamba cache from individual caches.
-
-        Args:
-            caches: List of MambaCache instances to batch
-        """
-        self._batch_size = len(caches)
-        self._cache_size = len(caches[0].cache) if caches else 0
-
-        # Stack each state array across the batch dimension
-        self.cache: list[mx.array | None] = []
-        for i in range(self._cache_size):
-            states = [c.cache[i] for c in caches]
-            if all(s is not None for s in states):
-                self.cache.append(mx.concatenate(states, axis=0))
-            else:
-                self.cache.append(None)
-
-    def __getitem__(self, idx: int) -> mx.array | None:
-        return self.cache[idx]
-
-    def __setitem__(self, idx: int, value: mx.array | None) -> None:
-        self.cache[idx] = value
-
-    def extract(self, idx: int) -> MambaCache:
-        """Extract a single request's cache from the batch.
-
-        Args:
-            idx: Index of the request in the batch
-
-        Returns:
-            MambaCache for the individual request
-        """
-        cache = MambaCache()
-        for i in range(self._cache_size):
-            if self.cache[i] is not None:
-                cache.cache[i] = self.cache[i][idx : idx + 1]
-        return cache
+AnyCache: TypeAlias = KVCache | ArraysCache | Any
 
 
 def _is_mamba_cache(cache: AnyCache) -> bool:
-    """Check if a cache is a Mamba-style cache (ArraysCache or MambaCache)."""
-    return isinstance(cache, (MambaCache, ArraysCache))
+    """Check if a cache is a Mamba-style cache (has .cache attribute)."""
+    return hasattr(cache, "cache") and not isinstance(cache, (KVCache, BatchKVCache))
 
 
 def _mlx_greedy_sample(logits: mx.array) -> mx.array:
@@ -303,7 +255,7 @@ class RequestState:
 
 def _merge_kv_caches(
     caches_list: list[list[AnyCache]],
-) -> list[BatchKVCache | BatchMambaCache]:
+) -> list[BatchKVCache | ArraysCache]:
     """Merge multiple per-request caches into batched caches.
 
     Args:
@@ -316,12 +268,12 @@ def _merge_kv_caches(
         return []
 
     num_layers = len(caches_list[0])
-    merged: list[BatchKVCache | BatchMambaCache] = []
+    merged: list[BatchKVCache | ArraysCache] = []
 
     for layer_idx in range(num_layers):
         layer_caches = [caches[layer_idx] for caches in caches_list]
         if _is_mamba_cache(layer_caches[0]):
-            batch_cache = BatchMambaCache(layer_caches)
+            batch_cache = ArraysCache.merge(layer_caches)
         else:
             batch_cache = BatchKVCache.merge(layer_caches)
         merged.append(batch_cache)
@@ -330,7 +282,7 @@ def _merge_kv_caches(
 
 
 def _extract_kv_cache(
-    batch_caches: list[BatchKVCache | BatchMambaCache], idx: int
+    batch_caches: list[BatchKVCache | ArraysCache], idx: int
 ) -> list[AnyCache]:
     """Extract a single request's cache from batched caches.
 
@@ -341,7 +293,18 @@ def _extract_kv_cache(
     Returns:
         List of caches for the request, one per layer
     """
-    return [cache.extract(idx) for cache in batch_caches]
+    extracted: list[AnyCache] = []
+    for cache in batch_caches:
+        if hasattr(cache, "extract"):
+            extracted.append(cache.extract(idx))
+        elif hasattr(cache, "cache") and not isinstance(cache, BatchKVCache):
+            # Fallback for older ArraysCache/MambaCache versions where .extract is missing
+            new_cache = type(cache)(len(cache.cache))
+            new_cache.cache = [c[idx : idx + 1] for c in cache.cache]
+            extracted.append(new_cache)
+        else:
+            raise TypeError(f"Unsupported cache type: {type(cache)}")
+    return extracted
 
 
 class MetalModelRunner:

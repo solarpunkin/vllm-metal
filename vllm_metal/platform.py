@@ -7,13 +7,13 @@ from typing import TYPE_CHECKING
 
 import psutil
 import torch
-from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.platforms.interface import DeviceCapability, Platform, PlatformEnum
 
 from vllm_metal.config import get_config
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
+    from vllm.v1.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
 
 logger = logging.getLogger(__name__)
